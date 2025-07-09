@@ -1,56 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart';
-import 'dart:async';
-import 'dart:io';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:google_fonts/google_fonts.dart';
-import 'dart:typed_data';
-
-// Database Helper Class
-class DatabaseHelper {
-  static Database? _database;
-  static const String dbName = 'quran.db';
-  static const String tablePages = 'pages';
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
-  }
-
-  Future<Database> _initDatabase() async {
-    String path = join(await getDatabasesPath(), dbName);
-    bool exists = await databaseExists(path);
-    if (!exists) {
-      ByteData data = await rootBundle.load('assets/quran.db');
-      List<int> bytes = data.buffer.asUint8List();
-      await File(path).writeAsBytes(bytes, flush: true);
-    }
-    return await openDatabase(path, readOnly: true);
-  }
-
-  Future<List<Map<String, dynamic>>> getPageData(int pageNumber) async {
-    final db = await database;
-    return await db.query(
-      tablePages,
-      where: 'page_number = ?',
-      whereArgs: [pageNumber],
-      orderBy: 'line_number',
-    );
-  }
-}
-
-// Text Helper Class (Using .txt files)
-class TextHelper {
-  static Future<String> loadPageText(int pageNumber) async {
-    try {
-      return await rootBundle.loadString('assets/docs/$pageNumber.txt');
-    } catch (e) {
-      return 'Error loading text: $e';
-    }
-  }
-}
 
 // Page Model
 class QuranPage {
@@ -62,51 +12,38 @@ class QuranPage {
 
 class QuranLine {
   final int lineNumber;
-  final String lineType;
   final bool isCentered;
-  final int firstWordId;
-  final int lastWordId;
-  final int surahNumber;
   final String text;
 
   QuranLine({
     required this.lineNumber,
-    required this.lineType,
     required this.isCentered,
-    required this.firstWordId,
-    required this.lastWordId,
-    required this.surahNumber,
     required this.text,
   });
 
-  factory QuranLine.fromMap(Map<String, dynamic> map, String text) {
-    int parseInt(dynamic value, {int defaultValue = 0}) {
-      if (value == null) return defaultValue;
-      final stringValue = value.toString();
-      if (stringValue.isEmpty) return defaultValue;
-      try {
-        return int.parse(stringValue);
-      } catch (e) {
-        print('Error parsing $stringValue: $e');
-        return defaultValue;
-      }
+  // Factory to create lines from text
+  static List<QuranLine> fromText(String text, int pageNumber) {
+    const int linesPerPage = 15;
+    final lines = text.split('\n').where((line) => line.trim().isNotEmpty).toList();
+    
+    // Ensure exactly 15 lines
+    List<QuranLine> result = [];
+    for (int i = 0; i < linesPerPage; i++) {
+      final idx = i + 1;
+      final lineText = i < lines.length ? lines[i].trim() : '';
+      final isCentered = idx == 1 || lineText.contains('بِسْمِ ٱللَّهِ') || lineText.contains('سُورَة');
+      result.add(QuranLine(
+        lineNumber: idx,
+        isCentered: isCentered,
+        text: lineText,
+      ));
     }
-
-    return QuranLine(
-      lineNumber: parseInt(map['line_number']),
-      lineType: map['line_type']?.toString() ?? '',
-      isCentered: parseInt(map['is_centered']) == 1,
-      firstWordId: parseInt(map['first_word_id']),
-      lastWordId: parseInt(map['last_word_id']),
-      surahNumber: parseInt(map['surah_number']),
-      text: text,
-    );
+    return result;
   }
 }
 
 // Main App
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+void main() {
   runApp(const QuranApp());
 }
 
@@ -119,9 +56,6 @@ class QuranApp extends StatelessWidget {
       title: 'Quran Reader',
       theme: ThemeData(
         primarySwatch: Colors.green,
-        textTheme: TextTheme(
-          bodyLarge: GoogleFonts.amiri(fontSize: 24, color: Colors.black),
-        ),
       ),
       home: const QuranPageView(),
     );
@@ -138,9 +72,16 @@ class QuranPageView extends StatefulWidget {
 
 class _QuranPageViewState extends State<QuranPageView> {
   final PageController _pageController = PageController();
-  final DatabaseHelper _dbHelper = DatabaseHelper();
   int _currentPage = 1;
   final int _totalPages = 604;
+
+  Future<String> loadPageText(int pageNumber) async {
+    try {
+      return await rootBundle.loadString('assets/docs/$pageNumber.txt');
+    } catch (e) {
+      return 'Error loading text: $e';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -158,41 +99,20 @@ class _QuranPageViewState extends State<QuranPageView> {
           });
         },
         itemBuilder: (context, index) {
-          return FutureBuilder<List<Map<String, dynamic>>>(
-            future: _dbHelper.getPageData(index + 1),
+          final pageNumber = index + 1;
+          return FutureBuilder<String>(
+            future: loadPageText(pageNumber),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(child: CircularProgressIndicator());
               }
-              if (snapshot.hasError) {
-                return Center(child: Text('Error loading page: ${snapshot.error}'));
+              if (snapshot.hasError || !snapshot.hasData) {
+                return Center(child: Text('Error loading page: ${snapshot.error ?? "No data"}'));
               }
-              return FutureBuilder<String>(
-                future: TextHelper.loadPageText(index + 1),
-                builder: (context, textSnapshot) {
-                  if (textSnapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (textSnapshot.hasError) {
-                    return Center(child: Text('Error loading text: ${textSnapshot.error}'));
-                  }
-                  final text = textSnapshot.data ?? '';
-                  final textLines = text.split('\n');
-                  final lines = snapshot.data
-                          ?.asMap()
-                          .entries
-                          .map((e) {
-                            int idx = e.key;
-                            var map = e.value;
-                            var lineText = idx < textLines.length ? textLines[idx] : '';
-                            return QuranLine.fromMap(map, lineText);
-                          })
-                          .toList() ??
-                      [];
-                  return QuranPageWidget(
-                    page: QuranPage(pageNumber: index + 1, lines: lines),
-                  );
-                },
+              final text = snapshot.data!;
+              final lines = QuranLine.fromText(text, pageNumber);
+              return QuranPageWidget(
+                page: QuranPage(pageNumber: pageNumber, lines: lines),
               );
             },
           );
@@ -236,9 +156,10 @@ class QuranPageWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Get the available width for text, accounting for padding
     final screenWidth = MediaQuery.of(context).size.width;
-    final textWidth = screenWidth - 32.0; // Subtract padding (16.0 * 2)
+    final availableWidth = screenWidth - 32.0; // 16.0 padding on each side
+    const double lineHeight = 40.0;
+    const int linesPerPage = 15;
 
     return Padding(
       padding: const EdgeInsets.all(16.0),
@@ -252,29 +173,141 @@ class QuranPageWidget extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Expanded(
-            child: ListView.builder(
-              itemCount: page.lines.length,
-              itemBuilder: (context, index) {
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: List.generate(linesPerPage, (index) {
                 final line = page.lines[index];
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4.0),
-                  child: Container(
-                    width: textWidth, // Fixed width for consistent stretching
-                    child: Text(
-                      line.text.isEmpty ? '[No text available]' : line.text,
-                      textAlign: line.isCentered ? TextAlign.center : TextAlign.justify,
-                      style: TextStyle(
-                        fontFamily: 'Uthmani',
-                        fontSize: 20,
-                        height: 1.8, // Increased line spacing for readability
-                        wordSpacing: 1.0, // Slight word spacing for better justification
-                      ),
-                      textDirection: TextDirection.rtl,
-                      softWrap: true,
-                    ),
+                return Container(
+                  height: lineHeight,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final textSpan = TextSpan(
+                        text: line.text.isEmpty ? ' ' : line.text,
+                        style: TextStyle( fontFamily : 'Uthmani',
+                          fontSize: 18.0, // Base font size
+                          color: Colors.black,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      );
+                      final textPainter = TextPainter(
+                        text: textSpan,
+                        textDirection: TextDirection.rtl,
+                        textAlign: line.isCentered ? TextAlign.center : TextAlign.justify,
+                        maxLines: 1,
+                      );
+                      textPainter.layout(maxWidth: availableWidth);
+
+                      // Adjust font size and spacing
+                      double fontSize = 18.0;
+                      double letterSpacing = 0.0;
+                      double wordSpacing = 0.0;
+
+                      if (!line.isCentered && line.text.isNotEmpty) {
+                        // Ensure text fits within width
+                        if (textPainter.width > availableWidth) {
+                          while (textPainter.width > availableWidth && fontSize > 14.0) {
+                            fontSize -= 0.5;
+                            textPainter.text = TextSpan(
+                              text: line.text,
+                              style: TextStyle( fontFamily : 'Uthmani',
+                                fontSize: fontSize,
+                                color: Colors.black,
+                                fontWeight: FontWeight.w400,
+                              ),
+                            );
+                            textPainter.layout(maxWidth: availableWidth);
+                          }
+                        } else {
+                          // Increase font size to approach width
+                          while (textPainter.width < availableWidth * 0.95 && fontSize < 22.0) {
+                            fontSize += 0.2;
+                            textPainter.text = TextSpan(
+                              text: line.text,
+                              style: TextStyle( fontFamily : 'Uthmani',
+                                fontSize: fontSize,
+                                color: Colors.black,
+                                fontWeight: FontWeight.w400,
+                              ),
+                            );
+                            textPainter.layout(maxWidth: availableWidth);
+                          }
+                        }
+
+                        // Adjust spacing to exactly fit width
+                        double targetWidth = availableWidth;
+                        double currentWidth = textPainter.width;
+                        if (currentWidth < targetWidth) {
+                          double remainingWidth = targetWidth - currentWidth;
+                          int wordCount = line.text.split(' ').length;
+                          wordSpacing = remainingWidth / (wordCount > 0 ? wordCount : 1);
+                          letterSpacing = remainingWidth / (line.text.length > 0 ? line.text.length : 1) * 0.3;
+
+                          textPainter.text = TextSpan(
+                            text: line.text,
+                            style: TextStyle( fontFamily : 'Uthmani',
+                              fontSize: fontSize,
+                              color: Colors.black,
+                              fontWeight: FontWeight.w400,
+                              letterSpacing: letterSpacing,
+                              wordSpacing: wordSpacing,
+                            ),
+                          );
+                          textPainter.layout(maxWidth: availableWidth);
+
+                          // If still exceeds, reduce font size slightly
+                          if (textPainter.width > availableWidth) {
+                            fontSize -= 0.2;
+                            letterSpacing *= 0.9;
+                            wordSpacing *= 0.9;
+                            textPainter.text = TextSpan(
+                              text: line.text,
+                              style: TextStyle( fontFamily : 'Uthmani',
+                                fontSize: fontSize,
+                                color: Colors.black,
+                                fontWeight: FontWeight.w400,
+                                letterSpacing: letterSpacing,
+                                wordSpacing: wordSpacing,
+                              ),
+                            );
+                            textPainter.layout(maxWidth: availableWidth);
+                          }
+                        }
+                      } else if (line.isCentered && line.text.isNotEmpty) {
+                        // Ensure centered line has a reasonable size
+                        if (textPainter.width < availableWidth * 0.5) {
+                          while (textPainter.width < availableWidth * 0.6 && fontSize < 22.0) {
+                            fontSize += 0.5;
+                            textPainter.text = TextSpan(
+                              text: line.text,
+                              style: TextStyle( fontFamily : 'Uthmani',
+                                fontSize: fontSize,
+                                color: Colors.black,
+                                fontWeight: FontWeight.w400,
+                              ),
+                            );
+                            textPainter.layout(maxWidth: availableWidth);
+                          }
+                        }
+                      }
+
+                      return Text(
+                        line.text.isEmpty ? '' : line.text,
+                        textAlign: line.isCentered ? TextAlign.center : TextAlign.justify,
+                        style: TextStyle( fontFamily : 'Uthmani',
+                          fontSize: fontSize,
+                          color: Colors.black,
+                          fontWeight: FontWeight.w400,
+                          letterSpacing: letterSpacing,
+                          wordSpacing: wordSpacing,
+                        ),
+                        textDirection: TextDirection.rtl,
+                        softWrap: false,
+                        maxLines: 1,
+                      );
+                    },
                   ),
                 );
-              },
+              }),
             ),
           ),
         ],
